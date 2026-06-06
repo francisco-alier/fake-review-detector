@@ -1,0 +1,29 @@
+paths:
+  raw_data: "data/raw/fake_reviews.parquet"
+  processed_data: "data/processed/fake_reviews_processed.parquet"
+  train_split: "data/processed/train.parquet"
+  calibration_split: "data/processed/calibration.parquet"
+  test_split: "data/processed/test.parquet"
+  model_dir: "models"
+  conformal_model: "models/conformal_model.pkl"
+
+data_params:
+  test_size: 0.30
+  random_state: 42
+  alpha: 0.05
+
+tfidf_params:
+  max_features: 5000
+  ngram_range: [1, 2]
+
+logistic_regression_params:
+  C: 1.0
+  max_iter: 1000
+
+xgboost_params:
+  n_estimators: 200
+  max_depth: 6
+  learning_rate: 0.1
+  subsample: 0.8
+  colsample_bytree: 0.8
+  random_state: 42
