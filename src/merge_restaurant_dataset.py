@@ -1,10 +1,18 @@
 import os
 from pathlib import Path
 import pandas as pd
+import yaml
 from datasets import load_dataset
 
 from src.generate_synthetic_reviews import generate_reviews
 from src.preprocessing import preprocess_pipeline
+
+
+def load_config(config_path="config.yaml") -> dict:
+    """Loads configuration parameters from a YAML file."""
+    with open(config_path, "r") as f:
+        config_data = yaml.safe_load(f)
+    return config_data
 
 
 def load_env_file(dotenv_path=".env"):
@@ -22,9 +30,21 @@ def load_env_file(dotenv_path=".env"):
 
 def build_restaurant_dataset():
     load_env_file()
-
-    raw_dir = Path("data/raw")
-    processed_dir = Path("data/processed")
+    
+    # Load settings from config
+    config = load_config()
+    paths = config["paths"]
+    data_params = config["data_params"]
+    
+    # Read values from config
+    num_synthetic = data_params.get("num_synthetic_reviews", 500)
+    processed_data_path = Path(paths["processed_data"])
+    processed_dir = processed_data_path.parent
+    
+    # Raw directory will be the parent of raw_data path
+    raw_data_path = Path(paths["raw_data"])
+    raw_dir = raw_data_path.parent
+    
     raw_dir.mkdir(parents=True, exist_ok=True)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -48,12 +68,12 @@ def build_restaurant_dataset():
         print(f"Error downloading Yelp reviews: {e}")
         return
 
-    print("\n--- STEP 2: Ingesting/Generating Synthetic Fake Reviews ---")
-    # Generate 500 fake reviews to build a balanced-enough dataset
+    print("\n--- STEP 2: Generating Synthetic Fake Reviews from Config ---")
+    # Generate number of reviews specified in config
     synthetic_path = raw_dir / "synthetic_reviews.parquet"
     
-    print("Generating 500 synthetic fake restaurant reviews...")
-    df_fake = generate_reviews(num_reviews=500)
+    print(f"Generating {num_synthetic} synthetic fake restaurant reviews...")
+    df_fake = generate_reviews(num_reviews=num_synthetic)
     df_fake.to_parquet(synthetic_path, index=False)
     print(f"Saved raw synthetic reviews to {synthetic_path}")
 
@@ -68,9 +88,8 @@ def build_restaurant_dataset():
     print("\n--- STEP 4: Preprocessing & Feature Extraction ---")
     df_processed = preprocess_pipeline(df_merged, text_col="text")
 
-    output_path = processed_dir / "fake_reviews_processed.parquet"
-    df_processed.to_parquet(output_path, index=False)
-    print(f"\nFinal restaurant dataset successfully processed and saved to: {output_path.resolve()}")
+    df_processed.to_parquet(processed_data_path, index=False)
+    print(f"\nFinal restaurant dataset successfully processed and saved to: {processed_data_path.resolve()}")
 
 
 if __name__ == "__main__":

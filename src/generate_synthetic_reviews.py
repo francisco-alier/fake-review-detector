@@ -5,8 +5,9 @@ import time
 from pathlib import Path
 import pandas as pd
 import requests
+import yaml
 
-# Pre-defined templates for offline/mock generation if Gemini API key is not provided or fails
+# Pre-defined templates for offline/mock generation if API keys or services fail
 MOCK_TEMPLATES = {
     "positive": [
         "Absolutely loved the food at {restaurant}! The {dish} was cooked to perfection and the service was top-notch. Highly recommend!",
@@ -34,11 +35,15 @@ RESTAURANTS = [
 ]
 
 
+def load_config(config_path="config.yaml") -> dict:
+    """Loads configuration parameters from a YAML file."""
+    with open(config_path, "r") as f:
+        config_data = yaml.safe_load(f)
+    return config_data
+
+
 def generate_batch_with_gemini(restaurant_name: str, dish: str, is_positive: bool, num_in_batch: int, api_key: str) -> list:
-    """
-    Calls Gemini API to generate a batch of reviews in a single request.
-    Requests JSON output format for reliable parsing.
-    """
+    """Calls Gemini API to generate a batch of reviews."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
     sentiment = "positive and glowing" if is_positive else "negative, critical and sabotage-style"
@@ -78,24 +83,72 @@ def generate_batch_with_gemini(restaurant_name: str, dish: str, is_positive: boo
         raise Exception(f"Gemini API Error (Status {response.status_code}): {response.text}")
 
 
+def generate_batch_with_ollama(restaurant_name: str, dish: str, is_positive: bool, num_in_batch: int, model: str, host: str) -> list:
+    """Calls a local Ollama server to generate a batch of reviews in JSON format."""
+    url = f"{host}/api/generate"
+    
+    sentiment = "positive and glowing" if is_positive else "negative, critical and sabotage-style"
+    prompt = (
+        f"Generate a list of exactly {num_in_batch} realistic online customer reviews for a restaurant named '{restaurant_name}'.\n"
+        f"The reviews must be {sentiment}, and each review must mention '{dish}' naturally.\n"
+        f"Make them look like real, slightly rushed customer reviews of varying lengths (1-3 sentences).\n"
+        f"Return the output strictly as a JSON array of strings. For example: [\"Review 1...\", \"Review 2...\"]. Do not include any other text."
+    )
+    
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "format": "json",
+        "stream": False,
+        "options": {
+            "temperature": 0.9
+        }
+    }
+    
+    response = requests.post(url, json=payload, timeout=30)
+    if response.status_code == 200:
+        response_json = response.json()
+        try:
+            raw_text = response_json["response"].strip()
+            parsed_list = json.loads(raw_text)
+            if isinstance(parsed_list, list):
+                cleaned_list = [str(item).strip() for item in parsed_list]
+                return cleaned_list
+            raise ValueError("Parsed JSON is not a list")
+        except (KeyError, json.JSONDecodeError, ValueError) as e:
+            raise ValueError(f"Failed to parse Ollama batch response: {e}. Raw response: {response_json}")
+    else:
+        raise Exception(f"Ollama API Error (Status {response.status_code}): {response.text}")
+
+
 def generate_reviews(num_reviews=500) -> pd.DataFrame:
     """
-    Generates synthetic reviews. Uses batch generation and rate limiting (4.5s delay)
-    to respect the Gemini API free tier limits (15 Requests Per Minute, 1500 Requests Per Day).
+    Generates synthetic reviews. Dynamically reads configuration to decide whether
+    to use Gemini, Ollama, or fallback to mock templates.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
-    use_api = api_key is not None and api_key != ""
+    config = load_config()
+    gen_params = config.get("generator_params", {})
+    backend = gen_params.get("backend", "mock").lower()
     
     reviews_list = []
-    batch_size = 10  # Number of reviews to generate in a single API call
+    batch_size = 10  # Number of reviews to generate in a single call
     
-    if use_api:
-        print(f"Using Gemini API to generate {num_reviews} reviews in batches of {batch_size}...")
-        print("Rate limiting enabled: 4.5 seconds delay between API calls to stay under 15 RPM.")
-    else:
-        print("GEMINI_API_KEY not found in environment variables. Generating mock reviews offline.")
+    # Check if Gemini key is available if backend is gemini
+    api_key = os.getenv("GEMINI_API_KEY")
+    if backend == "gemini" and (api_key is None or api_key == ""):
+        print("GEMINI_API_KEY not found in environment. Defaulting backend to mock.")
+        backend = "mock"
 
-    # Calculate total batches needed
+    if backend == "gemini":
+        print(f"Generating {num_reviews} reviews via Gemini API (Batch size: {batch_size})...")
+        print("Rate limiting enabled: 4.5 seconds delay between requests.")
+    elif backend == "ollama":
+        model = gen_params.get("ollama_model", "llama3")
+        host = gen_params.get("ollama_host", "http://localhost:11434")
+        print(f"Generating {num_reviews} reviews via local Ollama (Model: {model}, Host: {host}, Batch size: {batch_size})...")
+    else:
+        print(f"Generating {num_reviews} mock reviews offline using templates.")
+
     total_batches = (num_reviews + batch_size - 1) // batch_size
     
     for b in range(total_batches):
@@ -104,15 +157,12 @@ def generate_reviews(num_reviews=500) -> pd.DataFrame:
         rating = 5.0 if is_positive else 1.0
         label = 1  # 1 = computer-generated/fake
         
-        # Calculate size for this specific batch (handles remainder)
         current_batch_size = min(batch_size, num_reviews - len(reviews_list))
-        
         batch_reviews = []
-        origin = "Gemini" if use_api else "Mock"
+        origin = backend
         
-        if use_api:
+        if backend == "gemini":
             try:
-                # Call batch generation
                 batch_reviews = generate_batch_with_gemini(
                     restaurant_name=restaurant_name,
                     dish=dish,
@@ -122,20 +172,32 @@ def generate_reviews(num_reviews=500) -> pd.DataFrame:
                 )
                 time.sleep(4.5)
             except Exception as e:
-                print(f"\nAPI Error on batch {b + 1}: {e}. Falling back to templates for this batch...")
-                templates = MOCK_TEMPLATES["positive"] if is_positive else MOCK_TEMPLATES["negative"]
-                batch_reviews = [
-                    random.choice(templates).format(restaurant=restaurant_name, dish=dish)
-                    for _ in range(current_batch_size)
-                ]
-                origin = "Mock"  # Mark this batch as mock origin because the API call failed
-        else:
-            # Offline mock generation
+                print(f"\nGemini API Error on batch {b + 1}: {e}. Falling back to templates...")
+                origin = "Mock"
+        elif backend == "ollama":
+            try:
+                batch_reviews = generate_batch_with_ollama(
+                    restaurant_name=restaurant_name,
+                    dish=dish,
+                    is_positive=is_positive,
+                    num_in_batch=current_batch_size,
+                    model=model,
+                    host=host
+                )
+                # Small safety delay for local CPU load balancing
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"\nOllama Error on batch {b + 1}: {e}. Make sure Ollama is running and '{model}' is pulled. Falling back to templates...")
+                origin = "Mock"
+                
+        # Handle template fallback or direct mock backend
+        if len(batch_reviews) == 0 or origin == "Mock" or backend == "mock":
             templates = MOCK_TEMPLATES["positive"] if is_positive else MOCK_TEMPLATES["negative"]
             batch_reviews = [
                 random.choice(templates).format(restaurant=restaurant_name, dish=dish)
                 for _ in range(current_batch_size)
             ]
+            origin = "Mock" if backend != "mock" else "Mock"
             
         for text in batch_reviews:
             reviews_list.append({
@@ -159,9 +221,11 @@ def main():
     
     output_path = raw_dir / "synthetic_reviews.parquet"
     
-    # Generate 100 reviews by default for testing
-    df_gen = generate_reviews(num_reviews=100)
+    # Generate number of reviews from config
+    config = load_config()
+    num_revs = config.get("data_params", {}).get("num_synthetic_reviews", 100)
     
+    df_gen = generate_reviews(num_reviews=num_revs)
     df_gen.to_parquet(output_path, index=False)
     print(f"Saved to: {output_path.resolve()}")
 
