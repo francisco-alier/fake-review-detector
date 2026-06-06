@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 import pandas as pd
 import requests
+import yaml
 
 from src.utils import load_config
 
@@ -81,7 +82,10 @@ def generate_batch_with_gemini(restaurant_name: str, dish: str, is_positive: boo
 
 
 def generate_batch_with_ollama(restaurant_name: str, dish: str, is_positive: bool, num_in_batch: int, model: str, host: str) -> list:
-    """Calls a local Ollama server to generate a batch of reviews in JSON format."""
+    """
+    Calls a local Ollama server to generate a batch of reviews.
+    Timeout is set to 90s to accommodate slower CPU-based generation.
+    """
     url = f"{host}/api/generate"
     
     sentiment = "positive and glowing" if is_positive else "negative, critical and sabotage-style"
@@ -102,7 +106,8 @@ def generate_batch_with_ollama(restaurant_name: str, dish: str, is_positive: boo
         }
     }
     
-    response = requests.post(url, json=payload, timeout=30)
+    # Increased timeout to 90 seconds for CPU execution
+    response = requests.post(url, json=payload, timeout=90)
     if response.status_code == 200:
         response_json = response.json()
         try:
@@ -150,7 +155,9 @@ def generate_reviews(num_reviews=500) -> pd.DataFrame:
     backend = gen_params.get("backend", "mock").lower()
     
     reviews_list = []
-    batch_size = 10  # Number of reviews to generate in a single call
+    
+    # We decrease batch size to 5 for Ollama CPU execution to prevent HTTP timeouts
+    batch_size = 5 if backend == "ollama" else 10 
     
     # Check if Gemini key is available if backend is gemini
     api_key = os.getenv("GEMINI_API_KEY")
@@ -203,6 +210,7 @@ def generate_reviews(num_reviews=500) -> pd.DataFrame:
                     model=model,
                     host=host
                 )
+                # Keep a small pause for CPU cooling / server cleanup
                 time.sleep(0.5)
             except Exception as e:
                 logger.error(f"Ollama Error on batch {b + 1}: {e}. Make sure Ollama is running and model '{model}' is pulled. Falling back to templates...")
