@@ -1,9 +1,11 @@
+import logging
+from src.utils import setup_logging
+
 import os
 import pickle
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import yaml
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -15,13 +17,9 @@ from xgboost import XGBClassifier
 import mlflow
 import mlflow.sklearn
 from src.conformal import ConformalClassifier
+from src.utils import load_config
 
-
-def load_config(config_path="config.yaml") -> dict:
-    """Loads configuration parameters from a YAML file."""
-    with open(config_path, "r") as f:
-        config_data = yaml.safe_load(f)
-    return config_data
+logger = logging.getLogger("train")
 
 
 def build_lr_pipeline(config: dict) -> Pipeline:
@@ -145,7 +143,7 @@ def run_experiment(model_name, pipeline, X_train, y_train, X_calib, y_calib, X_t
     alpha = config["data_params"]["alpha"]
     
     with mlflow.start_run(run_name=model_name):
-        print(f"\n--- Running Experiment: {model_name} ---")
+        logger.info(f"--- Running Experiment: {model_name} ---")
         
         # Log common parameters
         mlflow.log_param("model_type", model_name.split("_")[0])
@@ -165,27 +163,27 @@ def run_experiment(model_name, pipeline, X_train, y_train, X_calib, y_calib, X_t
             mlflow.log_param("xgb_learning_rate", xgb_params["learning_rate"])
 
         # Train baseline
-        print("Training baseline estimator...")
+        logger.info("Training baseline estimator...")
         pipeline.fit(X_train, y_train)
         train_acc = pipeline.score(X_train, y_train)
         test_acc = pipeline.score(X_test, y_test)
-        print(f"Baseline Train Accuracy: {train_acc:.4%}")
-        print(f"Baseline Test Accuracy:  {test_acc:.4%}")
+        logger.info(f"Baseline Train Accuracy: {train_acc:.4%}")
+        logger.info(f"Baseline Test Accuracy:  {test_acc:.4%}")
         mlflow.log_metric("baseline_train_accuracy", train_acc)
         mlflow.log_metric("baseline_test_accuracy", test_acc)
 
         # Calibrate conformal prediction
-        print(f"Calibrating Conformal Prediction...")
+        logger.info("Calibrating Conformal Prediction...")
         conformal_model = ConformalClassifier(estimator=pipeline, alpha=alpha)
         conformal_model.fit_calibration(X_calib, y_calib)
-        print(f"Calibration complete. Threshold q_hat: {conformal_model.q_hat:.4f}")
+        logger.info(f"Calibration complete. Threshold q_hat: {conformal_model.q_hat:.4f}")
         mlflow.log_metric("conformal_q_hat", conformal_model.q_hat)
 
         # Evaluate conformal metrics
         metrics = evaluate_conformal(conformal_model, X_test, y_test)
-        print(f"Empirical Coverage:      {metrics['empirical_coverage']:.2%}")
-        print(f"Average Set Size:        {metrics['avg_set_size']:.4f}")
-        print(f"Certainty (Singleton %): {metrics['singleton_pct']:.2%}")
+        logger.info(f"Empirical Coverage:      {metrics['empirical_coverage']:.2%}")
+        logger.info(f"Average Set Size:        {metrics['avg_set_size']:.4f}")
+        logger.info(f"Certainty (Singleton %): {metrics['singleton_pct']:.2%}")
 
         # Log metrics
         mlflow.log_metric("empirical_coverage", metrics["empirical_coverage"])
@@ -214,7 +212,7 @@ def train_and_calibrate():
     if not processed_data_path.exists():
         raise FileNotFoundError(f"Processed dataset not found at {processed_data_path}. Run pipeline first.")
 
-    print("Loading processed dataset...")
+    logger.info("Loading processed dataset...")
     df = pd.read_parquet(processed_data_path)
 
     # Prepare features and target
@@ -231,7 +229,7 @@ def train_and_calibrate():
     ]
     y = df["label"]
 
-    print("Splitting dataset (70% Train, 15% Calibration, 15% Test)...")
+    logger.info("Splitting dataset (70% Train, 15% Calibration, 15% Test)...")
     X_train, X_temp, y_train, y_temp = train_test_split(
         X, y, test_size=data_params["test_size"], random_state=data_params["random_state"], stratify=y
     )
@@ -242,7 +240,6 @@ def train_and_calibrate():
     # Save splits to disk
     processed_dir = Path(paths["processed_data"]).parent
     
-    # Clean assignments for saving
     train_split = X_train.assign(label=y_train)
     calib_split = X_calib.assign(label=y_calib)
     test_split = X_test.assign(label=y_test)
@@ -250,7 +247,7 @@ def train_and_calibrate():
     train_split.to_parquet(Path(paths["train_split"]), index=False)
     calib_split.to_parquet(Path(paths["calibration_split"]), index=False)
     test_split.to_parquet(Path(paths["test_split"]), index=False)
-    print("Splits successfully saved to data/processed/")
+    logger.info("Splits successfully saved to data/processed/")
 
     # Setup MLflow experiment
     mlflow.set_experiment("Fake_Review_Detection")
@@ -270,7 +267,7 @@ def train_and_calibrate():
         X_train, y_train, X_calib, y_calib, X_test, y_test, config
     )
 
-    # Print Comparison Table
+    # Build Comparison Table
     comparison_data = [
         {
             "Model": "Logistic Regression",
@@ -288,13 +285,13 @@ def train_and_calibrate():
         }
     ]
     df_comparison = pd.DataFrame(comparison_data)
-    print("\n================ MODEL COMPARISON ================")
-    print(df_comparison.to_string(index=False))
-    print("==================================================\n")
+    
+    # Print clean report to log file and console
+    logger.info("\n" + "="*20 + " MODEL COMPARISON " + "="*20 + f"\n{df_comparison.to_string(index=False)}\n" + "="*58)
 
     # Determine best model based on accuracy
     best_results = xgb_results if xgb_results["accuracy"] > lr_results["accuracy"] else lr_results
-    print(f"Best model: {best_results['model_name']} (Accuracy: {best_results['accuracy']:.2%})")
+    logger.info(f"Best model selected: {best_results['model_name']} (Accuracy: {best_results['accuracy']:.2%})")
 
     # Save best model to disk
     model_dir = Path(paths["model_dir"])
@@ -304,8 +301,9 @@ def train_and_calibrate():
     with open(conformal_model_path, "wb") as f:
         pickle.dump(best_results["conformal_model"], f)
     
-    print(f"Saved best conformal model to: {conformal_model_path.resolve()}")
+    logger.info(f"Saved best conformal model to: {conformal_model_path.resolve()}")
 
 
 if __name__ == "__main__":
+    setup_logging("train.log")
     train_and_calibrate()

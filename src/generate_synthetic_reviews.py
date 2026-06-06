@@ -1,13 +1,17 @@
 import json
+import logging
 import os
 import random
 import time
 from pathlib import Path
 import pandas as pd
 import requests
-import yaml
 
-# Pre-defined templates for offline/mock generation if API keys or services fail
+from src.utils import load_config
+
+logger = logging.getLogger("generator")
+
+# Pre-defined templates for offline/mock generation
 MOCK_TEMPLATES = {
     "positive": [
         "Absolutely loved the food at {restaurant}! The {dish} was cooked to perfection and the service was top-notch. Highly recommend!",
@@ -33,13 +37,6 @@ RESTAURANTS = [
     ("Le Bistro", "steak frites"),
     ("Taco Loco", "barbacoa tacos")
 ]
-
-
-def load_config(config_path="config.yaml") -> dict:
-    """Loads configuration parameters from a YAML file."""
-    with open(config_path, "r") as f:
-        config_data = yaml.safe_load(f)
-    return config_data
 
 
 def generate_batch_with_gemini(restaurant_name: str, dish: str, is_positive: bool, num_in_batch: int, api_key: str) -> list:
@@ -121,6 +118,28 @@ def generate_batch_with_ollama(restaurant_name: str, dish: str, is_positive: boo
         raise Exception(f"Ollama API Error (Status {response.status_code}): {response.text}")
 
 
+def save_human_readable_reviews(df_reviews: pd.DataFrame):
+    """Saves the generated reviews to a human-readable text file for manual auditing."""
+    logs_dir = Path("logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    output_path = logs_dir / "generated_reviews.txt"
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("=" * 80 + "\n")
+        f.write("GENERATED FAKE REVIEWS AUDIT LOG\n")
+        f.write("=" * 80 + "\n\n")
+        
+        for idx, row in df_reviews.iterrows():
+            f.write(f"Review #{idx + 1}\n")
+            f.write(f"Restaurant: {row.get('restaurant_name', 'N/A')}\n")
+            f.write(f"Rating:     {row['rating']} stars\n")
+            f.write(f"Origin:     {row['origin']}\n")
+            f.write(f"Text:\n{row['text']}\n")
+            f.write("-" * 80 + "\n\n")
+            
+    logger.info(f"Saved human-readable review audit log to: {output_path.resolve()}")
+
+
 def generate_reviews(num_reviews=500) -> pd.DataFrame:
     """
     Generates synthetic reviews. Dynamically reads configuration to decide whether
@@ -136,18 +155,18 @@ def generate_reviews(num_reviews=500) -> pd.DataFrame:
     # Check if Gemini key is available if backend is gemini
     api_key = os.getenv("GEMINI_API_KEY")
     if backend == "gemini" and (api_key is None or api_key == ""):
-        print("GEMINI_API_KEY not found in environment. Defaulting backend to mock.")
+        logger.warning("GEMINI_API_KEY not found in environment. Defaulting backend to mock.")
         backend = "mock"
 
     if backend == "gemini":
-        print(f"Generating {num_reviews} reviews via Gemini API (Batch size: {batch_size})...")
-        print("Rate limiting enabled: 4.5 seconds delay between requests.")
+        logger.info(f"Generating {num_reviews} reviews via Gemini API (Batch size: {batch_size})...")
+        logger.info("Rate limiting enabled: 4.5 seconds delay between requests.")
     elif backend == "ollama":
         model = gen_params.get("ollama_model", "llama3")
         host = gen_params.get("ollama_host", "http://localhost:11434")
-        print(f"Generating {num_reviews} reviews via local Ollama (Model: {model}, Host: {host}, Batch size: {batch_size})...")
+        logger.info(f"Generating {num_reviews} reviews via local Ollama (Model: {model}, Host: {host}, Batch size: {batch_size})...")
     else:
-        print(f"Generating {num_reviews} mock reviews offline using templates.")
+        logger.info(f"Generating {num_reviews} mock reviews offline using templates.")
 
     total_batches = (num_reviews + batch_size - 1) // batch_size
     
@@ -172,7 +191,7 @@ def generate_reviews(num_reviews=500) -> pd.DataFrame:
                 )
                 time.sleep(4.5)
             except Exception as e:
-                print(f"\nGemini API Error on batch {b + 1}: {e}. Falling back to templates...")
+                logger.error(f"Gemini API Error on batch {b + 1}: {e}. Falling back to templates...")
                 origin = "Mock"
         elif backend == "ollama":
             try:
@@ -184,10 +203,9 @@ def generate_reviews(num_reviews=500) -> pd.DataFrame:
                     model=model,
                     host=host
                 )
-                # Small safety delay for local CPU load balancing
                 time.sleep(0.5)
             except Exception as e:
-                print(f"\nOllama Error on batch {b + 1}: {e}. Make sure Ollama is running and '{model}' is pulled. Falling back to templates...")
+                logger.error(f"Ollama Error on batch {b + 1}: {e}. Make sure Ollama is running and model '{model}' is pulled. Falling back to templates...")
                 origin = "Mock"
                 
         # Handle template fallback or direct mock backend
@@ -197,21 +215,25 @@ def generate_reviews(num_reviews=500) -> pd.DataFrame:
                 random.choice(templates).format(restaurant=restaurant_name, dish=dish)
                 for _ in range(current_batch_size)
             ]
-            origin = "Mock" if backend != "mock" else "Mock"
+            origin = "Mock"
             
         for text in batch_reviews:
             reviews_list.append({
                 "category": "Restaurant",
+                "restaurant_name": restaurant_name,
                 "rating": rating,
                 "text": text,
                 "label": label,
                 "origin": origin
             })
             
-        print(f"Generated {len(reviews_list)}/{num_reviews} reviews...", end="\r")
+        logger.info(f"Generated {len(reviews_list)}/{num_reviews} reviews.")
 
-    print(f"\nGeneration complete! Total reviews created: {len(reviews_list)}")
     df_synthetic = pd.DataFrame(reviews_list)
+    
+    # Save a readable text file for manual auditing
+    save_human_readable_reviews(df_synthetic)
+    
     return df_synthetic
 
 
@@ -221,14 +243,15 @@ def main():
     
     output_path = raw_dir / "synthetic_reviews.parquet"
     
-    # Generate number of reviews from config
     config = load_config()
     num_revs = config.get("data_params", {}).get("num_synthetic_reviews", 100)
     
     df_gen = generate_reviews(num_reviews=num_revs)
     df_gen.to_parquet(output_path, index=False)
-    print(f"Saved to: {output_path.resolve()}")
+    logger.info(f"Saved synthetic parquet to: {output_path.resolve()}")
 
 
 if __name__ == "__main__":
+    from src.utils import setup_logging
+    setup_logging("generation.log")
     main()

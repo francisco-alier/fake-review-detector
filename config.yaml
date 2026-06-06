@@ -15,7 +15,7 @@ data_params:
 
 generator_params:
   backend: "ollama"           # Options: "gemini", "ollama", "mock"
-  ollama_model: "llama3"      # e.g. "llama3", "llama3.1", "mistral", "phi3"
+  ollama_model: "llama3.2"    # e.g. "llama3", "llama3.1", "mistral", "phi3"
   ollama_host: "http://localhost:11434"
 
 tfidf_params:
